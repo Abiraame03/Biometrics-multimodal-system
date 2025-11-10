@@ -1,121 +1,97 @@
-# =========================================================
-# 📸 Multimodal Biometrics App — Streamlit version
-# Face + Iris + Gesture + Voice feedback
-# =========================================================
 import streamlit as st
-import cv2, mediapipe as mp, numpy as np, tempfile, os
+import cv2
+import mediapipe as mp
+import numpy as np
 import tensorflow as tf
 from gtts import gTTS
-from io import BytesIO
+import tempfile
+import os
 
-# -------------------------------
-# Config
-# -------------------------------
-st.set_page_config(page_title="Multimodal Auth", page_icon="🤖", layout="wide")
+st.set_page_config(page_title="Biometric Multimodal Emotion & Gesture App", layout="wide")
 
-gesture_voice = {
-    "FIVE": "Hello! How are you?",
-    "PEACE": "Thank you!",
-    "THUMBS_UP": "Yes, I understand.",
-    "THUMBS_DOWN": "No, please repeat.",
-    "FIST": "Goodbye!",
-    "CALL_ME": "Call someone for help!",
-    "ROCK": "Let’s go!",
-    "OK": "Everything is fine."
-}
+st.title("🎯 Multimodal Emotion + Gesture Recognition System")
+st.markdown("This app detects **face**, **iris**, and **gesture** from live webcam feed using a TensorFlow Lite model and gives **voice feedback** of the detected emotion.")
 
-mp_face = mp.solutions.face_detection.FaceDetection(0.5)
-mp_hands = mp.solutions.hands.Hands(max_num_hands=1, min_detection_confidence=0.7)
+# Load TFLite model
+model_path = "gesture_model.tflite"
+interpreter = tf.lite.Interpreter(model_path=model_path)
+interpreter.allocate_tensors()
+input_details = interpreter.get_input_details()
+output_details = interpreter.get_output_details()
+
+mp_face = mp.solutions.face_mesh
+mp_hands = mp.solutions.hands
 mp_draw = mp.solutions.drawing_utils
 
-# -------------------------------
-# Load TFLite model
-# -------------------------------
-@st.cache_resource
-def load_tflite_model(path="gesture_model.tflite"):
-    interpreter = tf.lite.Interpreter(model_path=path)
-    interpreter.allocate_tensors()
-    return interpreter
+# Map gestures → emotions
+gesture_to_emotion = {
+    "thumbs_up": "Happy",
+    "thumbs_down": "Sad",
+    "peace": "Calm",
+    "fist": "Angry",
+    "open_palm": "Surprised"
+}
 
-def predict_gesture(interpreter, img):
-    input_details = interpreter.get_input_details()
-    output_details = interpreter.get_output_details()
+# Voice output function
+def speak_emotion(emotion):
+    tts = gTTS(text=f"The detected emotion is {emotion}", lang='en')
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
+    tts.save(tmp.name)
+    st.audio(tmp.name, format="audio/mp3")
 
-    img = cv2.resize(img, (128, 128))
-    img = np.expand_dims(img, axis=0).astype(np.float32) / 255.0
+# Run webcam
+run = st.toggle("Enable Camera")
 
-    interpreter.set_tensor(input_details[0]['index'], img)
-    interpreter.invoke()
-    preds = interpreter.get_tensor(output_details[0]['index'])[0]
+if run:
+    cap = cv2.VideoCapture(0)
+    with mp_face.FaceMesh(max_num_faces=1) as face_mesh, mp_hands.Hands(max_num_hands=1) as hands:
+        stframe = st.empty()
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                st.error("Failed to access camera.")
+                break
 
-    idx = np.argmax(preds)
-    conf = float(np.max(preds))
-    classes = list(gesture_voice.keys())
-    label = classes[idx] if idx < len(classes) else "Unknown"
-    return label, conf
+            frame = cv2.flip(frame, 1)
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
-# -------------------------------
-# Voice output
-# -------------------------------
-def play_voice(text):
-    tts = gTTS(text)
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as fp:
-        tts.save(fp.name)
-        audio_file = open(fp.name, "rb")
-        audio_bytes = audio_file.read()
-        st.audio(audio_bytes, format="audio/mp3")
-        audio_file.close()
-        os.remove(fp.name)
+            # Face + iris detection
+            face_result = face_mesh.process(rgb)
+            if face_result.multi_face_landmarks:
+                for landmarks in face_result.multi_face_landmarks:
+                    mp_draw.draw_landmarks(frame, landmarks, mp_face.FACEMESH_CONTOURS)
 
-# -------------------------------
-# Streamlit camera UI
-# -------------------------------
-st.title("🤖 Multimodal Authentication and Voice Feedback")
-st.write("Face + Iris + Gesture + Voice")
+            # Gesture detection
+            hand_result = hands.process(rgb)
+            emotion_detected = None
+            if hand_result.multi_hand_landmarks:
+                for hand_landmarks in hand_result.multi_hand_landmarks:
+                    mp_draw.draw_landmarks(frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
+                    lm = np.array([[lm.x, lm.y, lm.z] for lm in hand_landmarks.landmark]).flatten()
+                    lm = np.expand_dims(lm, axis=0).astype(np.float32)
 
-gesture_model_path = "gesture_model.tflite"
-if not os.path.exists(gesture_model_path):
-    st.warning("Upload your gesture_model.tflite file below 👇")
-    uploaded = st.file_uploader("Upload model", type=["tflite"])
-    if uploaded:
-        with open(gesture_model_path, "wb") as f:
-            f.write(uploaded.getbuffer())
-        st.success("Model uploaded successfully! ✅")
+                    # Model inference
+                    interpreter.set_tensor(input_details[0]['index'], lm)
+                    interpreter.invoke()
+                    pred = interpreter.get_tensor(output_details[0]['index'])
+                    gesture_idx = int(np.argmax(pred))
 
-interpreter = None
-if os.path.exists(gesture_model_path):
-    interpreter = load_tflite_model(gesture_model_path)
+                    # Replace with your gesture label list
+                    gesture_labels = list(gesture_to_emotion.keys())
+                    if gesture_idx < len(gesture_labels):
+                        gesture = gesture_labels[gesture_idx]
+                        emotion_detected = gesture_to_emotion.get(gesture, "Neutral")
 
-frame_window = st.image([])
-cam = st.camera_input("Show your gesture 👇")
+            cv2.putText(frame, f"Emotion: {emotion_detected or 'Detecting...'}", (30, 40),
+                        cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
 
-if cam is not None and interpreter:
-    # Read image
-    file_bytes = np.asarray(bytearray(cam.read()), dtype=np.uint8)
-    frame = cv2.imdecode(file_bytes, 1)
-    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            stframe.image(frame, channels="BGR")
 
-    # Face detection
-    face_result = mp_face.process(frame_rgb)
-    if face_result.detections:
-        for det in face_result.detections:
-            bboxC = det.location_data.relative_bounding_box
-            ih, iw, _ = frame.shape
-            x, y, w, h = int(bboxC.xmin * iw), int(bboxC.ymin * ih), int(bboxC.width * iw), int(bboxC.height * ih)
-            cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
+            if emotion_detected:
+                speak_emotion(emotion_detected)
+                break
 
-    # Hand (gesture)
-    hands_result = mp_hands.process(frame_rgb)
-    if hands_result.multi_hand_landmarks:
-        for handLms in hands_result.multi_hand_landmarks:
-            mp_draw.draw_landmarks(frame, handLms, mp.solutions.hands.HAND_CONNECTIONS)
-
-        label, conf = predict_gesture(interpreter, frame)
-        st.write(f"### ✋ Gesture: {label} ({conf:.2f})")
-        if label in gesture_voice:
-            st.info(f"🗣 Voice: {gesture_voice[label]}")
-            play_voice(gesture_voice[label])
-
-    frame_window.image(frame, channels="BGR")
-
-st.caption("© 2025 Multimodal Auth System")
+        cap.release()
+        st.success("✅ Detection completed.")
+else:
+    st.info("👆 Turn on the camera toggle to start detection.")
