@@ -1,99 +1,86 @@
 import streamlit as st
-import cv2, mediapipe as mp, numpy as np, pickle, requests, os, time
-from gtts import gTTS
-from tflite_runtime.interpreter import Interpreter  # ✅ lightweight runtime
+import tensorflow as tf
+import numpy as np
+import cv2
+from PIL import Image
+import requests
+import io
 
-# ============================================================
-# 🔹 Load models from GitHub repository
-# ============================================================
+# -------------------------------
+# 🌐 App Config
+# -------------------------------
+st.set_page_config(page_title="Multimodal Biometric System", layout="centered")
+st.title("🧠 Multimodal Biometric System (Gesture Recognition)")
+
+st.markdown("""
+This app uses your **camera** to recognize gestures in real-time using a TensorFlow Lite model.
+The model is fetched directly from your GitHub repository.
+""")
+
+# -------------------------------
+# ⚙️ Load TFLite Model from GitHub
+# -------------------------------
+MODEL_URL = "https://github.com/Abiraame03/Biometrics-multimodal-system/raw/main/models/gesture_model.tflite"
+
 @st.cache_resource
-def load_models():
-    repo_url = "https://github.com/Abiraame03/Biometrics-multimodal-system/raw/main/gesture%20auth%20app%20models/"
-    files = {
-        "gesture_model": "gesture_model.tflite",
-        "encoder": "gesture_label_encoder.pkl",
-        "voice_map": "voice_map.pkl"
-    }
+def load_tflite_model():
+    response = requests.get(MODEL_URL)
+    response.raise_for_status()
+    model_bytes = io.BytesIO(response.content)
+    interpreter = tf.lite.Interpreter(model_content=model_bytes.read())
+    interpreter.allocate_tensors()
+    return interpreter
 
-    local_models = {}
-    os.makedirs("models", exist_ok=True)
-    for key, fname in files.items():
-        url = repo_url + fname
-        r = requests.get(url)
-        if r.status_code == 200:
-            with open(f"models/{fname}", "wb") as f:
-                f.write(r.content)
-            local_models[key] = f"models/{fname}"
-        else:
-            st.error(f"❌ Couldn't fetch {fname} from repo.")
-    return local_models
-
-models = load_models()
-
-# ============================================================
-# 🔹 Load Gesture Model
-# ============================================================
-interpreter = Interpreter(model_path=models["gesture_model"])  # ✅ changed
-interpreter.allocate_tensors()
+interpreter = load_tflite_model()
 input_details = interpreter.get_input_details()
 output_details = interpreter.get_output_details()
 
-encoder = pickle.load(open(models["encoder"], "rb"))
-voice_map = pickle.load(open(models["voice_map"], "rb"))
+# -------------------------------
+# 🧩 Class Labels
+# -------------------------------
+CLASS_NAMES = ["Thumbs Up 👍", "Thumbs Down 👎", "Peace ✌️", "Stop ✋", "OK 👌", "Fist ✊"]
 
-mp_hands = mp.solutions.hands
+# -------------------------------
+# 📸 Camera Input
+# -------------------------------
+st.header("📷 Capture Your Gesture")
+img_file = st.camera_input("Show your hand gesture below")
 
-st.set_page_config(page_title="Universal Gesture Recognition", layout="centered")
-st.title("✋ Universal Gesture Recognition System")
-st.markdown("Recognize common hand gestures in real-time — usable by **any user** 👤")
+if img_file is not None:
+    image = Image.open(img_file)
+    st.image(image, caption="Captured Gesture", use_column_width=True)
 
-run = st.checkbox("🎥 Start Camera")
-stframe = st.image([])
-hands = mp_hands.Hands(max_num_hands=1)
+    # Preprocess the image
+    img = image.convert("RGB")
+    img = img.resize((128, 128))  # Change to your model’s input size
+    img_array = np.array(img, dtype=np.float32) / 255.0
+    img_array = np.expand_dims(img_array, axis=0)
 
-# ============================================================
-# ✋ Real-time Gesture Recognition
-# ============================================================
-if run:
-    cap = cv2.VideoCapture(0)
-    prev_gesture = None
-    last_spoken = time.time()
+    # Run inference
+    interpreter.set_tensor(input_details[0]['index'], img_array)
+    interpreter.invoke()
+    preds = interpreter.get_tensor(output_details[0]['index'])[0]
 
-    while run:
-        ret, frame = cap.read()
-        if not ret:
-            st.warning("⚠️ Camera not accessible.")
-            break
+    # Get prediction
+    predicted_class = CLASS_NAMES[np.argmax(preds)]
+    confidence = float(np.max(preds)) * 100
 
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        result = hands.process(rgb)
+    st.success(f"### 🧾 Prediction: {predicted_class}")
+    st.write(f"**Confidence:** {confidence:.2f}%")
 
-        if result.multi_hand_landmarks:
-            for hand in result.multi_hand_landmarks:
-                pts = np.array([[lm.x, lm.y, lm.z] for lm in hand.landmark]).flatten()
-                input_data = np.expand_dims(pts.astype(np.float32), axis=0)
-                interpreter.set_tensor(input_details[0]['index'], input_data)
-                interpreter.invoke()
-                output_data = interpreter.get_tensor(output_details[0]['index'])
-                gesture = encoder.inverse_transform([np.argmax(output_data)])[0]
-                confidence = np.max(output_data)
+    st.progress(confidence / 100)
 
-                cv2.putText(frame, f"{gesture} ({confidence:.2f})", (30, 50),
-                            cv2.FONT_HERSHEY_SIMPLEX, 1.1, (0,255,0), 3)
+else:
+    st.info("Please show your gesture to the camera.")
 
-                # 🔊 Speak gesture name once per detection
-                if gesture != prev_gesture or time.time() - last_spoken > 3:
-                    text = voice_map.get(gesture, gesture)
-                    tts = gTTS(f"Detected {text}")
-                    tts.save("voice.mp3")
-                    os.system("start voice.mp3" if os.name == "nt" else "afplay voice.mp3")
-                    last_spoken = time.time()
-                    prev_gesture = gesture
-
-        stframe.image(frame, channels="BGR")
-
-    cap.release()
-    st.success("✅ Camera stopped.")
-
-st.markdown("---")
-st.caption("Developed — Universal Gesture Recognition System")
+# -------------------------------
+# 🔮 For Future Expansion
+# -------------------------------
+st.markdown("""
+---
+### 🌍 Future Scope
+- Add **Face** and **Iris** authentication (same pipeline).
+- Integrate **Emotion Detection** via MediaPipe.
+- Combine all into a single **multimodal authentication system**.
+- Deploy on mobile or IoT devices using **TensorFlow Lite**.
+""")
