@@ -1,7 +1,7 @@
 import streamlit as st
-import cv2, mediapipe as mp, numpy as np, pickle, requests, tensorflow as tf
+import cv2, mediapipe as mp, numpy as np, pickle, requests, os, time
 from gtts import gTTS
-import os, time
+from tflite_runtime.interpreter import Interpreter  # ✅ lightweight runtime
 
 # ============================================================
 # 🔹 Load models from GitHub repository
@@ -28,12 +28,12 @@ def load_models():
             st.error(f"❌ Couldn't fetch {fname} from repo.")
     return local_models
 
+models = load_models()
 
 # ============================================================
-# 🔹 Initialize
+# 🔹 Load Gesture Model
 # ============================================================
-models = load_models()
-interpreter = tf.lite.Interpreter(model_path=models["gesture_model"])
+interpreter = Interpreter(model_path=models["gesture_model"])  # ✅ changed
 interpreter.allocate_tensors()
 input_details = interpreter.get_input_details()
 output_details = interpreter.get_output_details()
@@ -96,4 +96,4 @@ if run:
     st.success("✅ Camera stopped.")
 
 st.markdown("---")
-st.caption("Developed the Universal Gesture Recognition System")
+st.caption("Developed — Universal Gesture Recognition System")
