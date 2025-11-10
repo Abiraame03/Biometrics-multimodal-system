@@ -9,6 +9,3 @@ pandas
 Pillow
 requests
 protobuf==3.20.3
-
-pickle5
-tflite-runtime==2.14.0
