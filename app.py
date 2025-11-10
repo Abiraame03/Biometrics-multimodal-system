@@ -1,32 +1,64 @@
-import cv2
-import numpy as np
 import streamlit as st
-from tensorflow.lite.python.interpreter import Interpreter
-import mediapipe as mp
+import cv2, mediapipe as mp, numpy as np, pickle, tempfile, requests, tensorflow as tf
 from gtts import gTTS
-import tempfile
 import os
-from playsound import playsound
 
-# =====================================================
-# 1️⃣ Streamlit App Title
-# =====================================================
-st.set_page_config(page_title="Multimodal Authentication", layout="centered")
-st.title("🔒 Multimodal Authentication & Voice Feedback System")
+# ============================================================
+# CONFIG
+# ============================================================
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
+st.set_page_config(page_title="Multimodal Biometric System", layout="centered")
 
-# =====================================================
-# 2️⃣ Load Gesture TFLite Model
-# =====================================================
-gesture_model_path = "gesture_model.tflite"  # your model path
-interpreter = Interpreter(model_path=gesture_model_path)
+st.title("🧠 Multimodal Biometric Authentication System")
+st.markdown("### 👁️ Face + Iris + ✋ Gesture Recognition with Voice Feedback")
+
+# ============================================================
+# 🔹 Load models from GitHub repository
+# ============================================================
+@st.cache_resource
+def load_models():
+    repo_url = "https://github.com/Abiraame03/Biometrics-multimodal-system/raw/main/gesture%20auth%20app%20models/"
+    files = {
+        "gesture_model": "gesture_model.tflite",
+        "encoder": "gesture_label_encoder.pkl",
+    }
+
+    local_models = {}
+    os.makedirs("models", exist_ok=True)
+    for key, fname in files.items():
+        url = repo_url + fname
+        r = requests.get(url)
+        if r.status_code == 200:
+            with open(f"models/{fname}", "wb") as f:
+                f.write(r.content)
+            local_models[key] = f"models/{fname}"
+        else:
+            st.error(f"❌ Couldn't fetch {fname} from repo.")
+    return local_models
+
+models = load_models()
+
+# ============================================================
+# 🔹 Load Gesture Model
+# ============================================================
+interpreter = tf.lite.Interpreter(model_path=models["gesture_model"])
 interpreter.allocate_tensors()
 input_details = interpreter.get_input_details()
 output_details = interpreter.get_output_details()
 
-# =====================================================
-# 3️⃣ Gesture Label Mapping (with Voice Command)
-# =====================================================
-gesture_to_voice = {
+encoder = pickle.load(open(models["encoder"], "rb"))
+
+# ============================================================
+# 🔹 Mediapipe Setup
+# ============================================================
+mp_hands = mp.solutions.hands
+mp_face = mp.solutions.face_detection
+mp_iris = mp.solutions.face_mesh
+
+# ============================================================
+# 🔹 Gesture → Voice mapping
+# ============================================================
+gesture_voice_map = {
     "FIVE": "Hello! How are you?",
     "PEACE": "Thank you!",
     "THUMBS_UP": "Yes, I understand.",
@@ -37,84 +69,89 @@ gesture_to_voice = {
     "OK": "Everything is fine."
 }
 
-gesture_labels = list(gesture_to_voice.keys())
+# ============================================================
+# 🔹 Helper functions
+# ============================================================
+def speak_text(text):
+    """Convert gesture meaning to speech"""
+    tts = gTTS(text)
+    tts.save("voice.mp3")
+    os.system("start voice.mp3" if os.name == "nt" else "mpg123 voice.mp3")
 
-# =====================================================
-# 4️⃣ Initialize Mediapipe
-# =====================================================
-mp_hands = mp.solutions.hands
-mp_face = mp.solutions.face_detection
-mp_drawing = mp.solutions.drawing_utils
-
-# =====================================================
-# 5️⃣ Utility Functions
-# =====================================================
 def predict_gesture(frame):
-    img = cv2.resize(frame, (224, 224))  # must match training input size
-    img = np.expand_dims(img / 255.0, axis=0).astype(np.float32)
+    """Run the gesture recognition model"""
+    img = cv2.resize(frame, (128,128))
+    img = img.astype(np.float32) / 255.0
+    img = np.expand_dims(img, axis=0)
+
+    # Convert to flattened input if needed
+    if len(input_details[0]['shape']) == 2:
+        img = img.reshape((1, -1))
+
     interpreter.set_tensor(input_details[0]['index'], img)
     interpreter.invoke()
-    preds = interpreter.get_tensor(output_details[0]['index'])
-    label = gesture_labels[np.argmax(preds)]
-    conf = np.max(preds)
-    return label, conf
+    output_data = interpreter.get_tensor(output_details[0]['index'])
+    pred_idx = np.argmax(output_data)
+    gesture = encoder.inverse_transform([pred_idx])[0]
+    confidence = float(np.max(output_data))
+    return gesture, confidence
 
-def speak(text):
-    tts = gTTS(text=text, lang="en")
-    with tempfile.NamedTemporaryFile(delete=True) as fp:
-        temp_path = f"{fp.name}.mp3"
-        tts.save(temp_path)
-        playsound(temp_path)
-        os.remove(temp_path)
+# ============================================================
+# 🔹 Streamlit UI
+# ============================================================
+st.markdown("---")
+st.subheader("🎥 Live Camera Feed")
 
-# =====================================================
-# 6️⃣ Camera Input
-# =====================================================
 run = st.checkbox("Start Camera")
-FRAME_WINDOW = st.image([])
 
 if run:
     cap = cv2.VideoCapture(0)
-    st.info("Camera started. Showing real-time detection...")
-    with mp_hands.Hands(max_num_hands=1) as hands, mp_face.FaceDetection(min_detection_confidence=0.6) as face_detector:
-        while cap.isOpened():
-            ret, frame = cap.read()
-            if not ret:
-                st.warning("Camera feed not available.")
-                break
+    stframe = st.empty()
 
-            frame = cv2.flip(frame, 1)
-            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    face_detect = mp_face.FaceDetection(model_selection=0, min_detection_confidence=0.5)
+    iris_mesh = mp_iris.FaceMesh(max_num_faces=1)
+    hands = mp_hands.Hands(max_num_hands=1)
 
-            # Face Detection
-            face_results = face_detector.process(rgb_frame)
-            if face_results.detections:
-                for det in face_results.detections:
-                    mp_drawing.draw_detection(frame, det)
+    st.info("🟢 Camera running... Press Stop to end session")
 
-            # Gesture Detection
-            hand_results = hands.process(rgb_frame)
-            if hand_results.multi_hand_landmarks:
-                for handLms in hand_results.multi_hand_landmarks:
-                    mp_drawing.draw_landmarks(frame, handLms, mp_hands.HAND_CONNECTIONS)
-                    x_min = int(min([lm.x for lm in handLms.landmark]) * frame.shape[1])
-                    y_min = int(min([lm.y for lm in handLms.landmark]) * frame.shape[0])
-                    x_max = int(max([lm.x for lm in handLms.landmark]) * frame.shape[1])
-                    y_max = int(max([lm.y for lm in handLms.landmark]) * frame.shape[0])
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            st.warning("Camera not accessible.")
+            break
 
-                    roi = frame[y_min:y_max, x_min:x_max]
-                    if roi.size > 0:
-                        label, conf = predict_gesture(roi)
-                        cv2.putText(frame, f"{label} ({conf:.2f})", (x_min, y_min - 10),
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
+        frame = cv2.flip(frame, 1)
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
-                        # Voice feedback
-                        speak(gesture_to_voice[label])
+        # --- Face detection ---
+        faces = face_detect.process(rgb)
+        if faces.detections:
+            for det in faces.detections:
+                box = det.location_data.relative_bounding_box
+                h, w, _ = frame.shape
+                x, y, ww, hh = int(box.xmin * w), int(box.ymin * h), int(box.width * w), int(box.height * h)
+                cv2.rectangle(frame, (x, y), (x+ww, y+hh), (0, 255, 0), 2)
+                cv2.putText(frame, "Face Detected", (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,255,0), 2)
 
-            FRAME_WINDOW.image(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+        # --- Iris detection ---
+        iris_results = iris_mesh.process(rgb)
+        if iris_results.multi_face_landmarks:
+            cv2.putText(frame, "Iris Detected", (30, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255,255,0), 2)
+
+        # --- Gesture detection ---
+        hand_results = hands.process(rgb)
+        if hand_results.multi_hand_landmarks:
+            gesture, conf = predict_gesture(frame)
+            cv2.putText(frame, f"{gesture} ({conf:.2f})", (30, 100), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0,255,0), 3)
+
+            if conf > 0.7:
+                message = gesture_voice_map.get(gesture, "")
+                if message:
+                    speak_text(message)
+
+        stframe.image(frame, channels="BGR")
 
     cap.release()
-else:
-    st.warning("Turn on the camera to start detection.")
 
-st.success("✅ App ready! Use gestures to trigger voice feedback.")
+st.markdown("---")
+st.caption("Developed for multimodal user-independent authentication with real-time feedback.")
