@@ -1,7 +1,8 @@
 import streamlit as st
-import cv2, mediapipe as mp, numpy as np, pickle, tempfile, requests, tensorflow as tf
+import cv2, mediapipe as mp, numpy as np, pickle, requests, os
 from gtts import gTTS
-import os
+import tempfile
+from tflite_runtime.interpreter import Interpreter
 
 # ============================================================
 # CONFIG
@@ -41,7 +42,7 @@ models = load_models()
 # ============================================================
 # 🔹 Load Gesture Model
 # ============================================================
-interpreter = tf.lite.Interpreter(model_path=models["gesture_model"])
+interpreter = Interpreter(model_path=models["gesture_model"])
 interpreter.allocate_tensors()
 input_details = interpreter.get_input_details()
 output_details = interpreter.get_output_details()
@@ -75,8 +76,9 @@ gesture_voice_map = {
 def speak_text(text):
     """Convert gesture meaning to speech"""
     tts = gTTS(text)
-    tts.save("voice.mp3")
-    os.system("start voice.mp3" if os.name == "nt" else "mpg123 voice.mp3")
+    temp_path = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
+    tts.save(temp_path.name)
+    st.audio(temp_path.name, format="audio/mp3")
 
 def predict_gesture(frame):
     """Run the gesture recognition model"""
@@ -84,7 +86,6 @@ def predict_gesture(frame):
     img = img.astype(np.float32) / 255.0
     img = np.expand_dims(img, axis=0)
 
-    # Convert to flattened input if needed
     if len(input_details[0]['shape']) == 2:
         img = img.reshape((1, -1))
 
@@ -143,7 +144,6 @@ if run:
         if hand_results.multi_hand_landmarks:
             gesture, conf = predict_gesture(frame)
             cv2.putText(frame, f"{gesture} ({conf:.2f})", (30, 100), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0,255,0), 3)
-
             if conf > 0.7:
                 message = gesture_voice_map.get(gesture, "")
                 if message:
@@ -154,4 +154,4 @@ if run:
     cap.release()
 
 st.markdown("---")
-st.caption("Developed for multimodal user-independent authentication with real-time feedback.")
+st.caption("Developed for multimodal user-independent authentication with real-time voice feedback.")
