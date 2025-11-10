@@ -1,86 +1,104 @@
 import streamlit as st
-import tensorflow as tf
-import numpy as np
 import cv2
+import numpy as np
+import tensorflow as tf
+import pickle
+import tempfile
+from tensorflow.keras.models import load_model
+from sklearn.preprocessing import LabelEncoder
 from PIL import Image
-import requests
-import io
+import urllib.request
+import os
 
 # -------------------------------
-# 🌐 App Config
+# 🔧 CONFIG
 # -------------------------------
-st.set_page_config(page_title="Multimodal Biometric System", layout="centered")
-st.title("🧠 Multimodal Biometric System (Gesture Recognition)")
+REPO_BASE = "https://raw.githubusercontent.com/Abiraame03/Biometrics-multimodal-system/main/gesture%20auth%20app%20models"
 
-st.markdown("""
-This app uses your **camera** to recognize gestures in real-time using a TensorFlow Lite model.
-The model is fetched directly from your GitHub repository.
-""")
+MODEL_PATH_H5 = f"{REPO_BASE}/gesture_model.h5"
+MODEL_PATH_TFLITE = f"{REPO_BASE}/gesture_model.tflite"
+LABEL_ENCODER_PATH = f"{REPO_BASE}/gesture_label_encoder.pkl"
+FACE_EMB_PATH = f"{REPO_BASE}/face_embeddings.pkl"
+IRIS_EMB_PATH = f"{REPO_BASE}/iris_embeddings.pkl"
 
 # -------------------------------
-# ⚙️ Load TFLite Model from GitHub
+# 🧩 LOAD MODELS
 # -------------------------------
-MODEL_URL = "https://github.com/Abiraame03/Biometrics-multimodal-system/raw/main/models/gesture_model.tflite"
+@st.cache_resource
+def load_gesture_model():
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".h5") as tmp:
+        urllib.request.urlretrieve(MODEL_PATH_H5, tmp.name)
+        model = load_model(tmp.name)
+    return model
 
 @st.cache_resource
-def load_tflite_model():
-    response = requests.get(MODEL_URL)
-    response.raise_for_status()
-    model_bytes = io.BytesIO(response.content)
-    interpreter = tf.lite.Interpreter(model_content=model_bytes.read())
-    interpreter.allocate_tensors()
-    return interpreter
+def load_label_encoder():
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".pkl") as tmp:
+        urllib.request.urlretrieve(LABEL_ENCODER_PATH, tmp.name)
+        with open(tmp.name, "rb") as f:
+            le = pickle.load(f)
+    return le
 
-interpreter = load_tflite_model()
-input_details = interpreter.get_input_details()
-output_details = interpreter.get_output_details()
+gesture_model = load_gesture_model()
+gesture_labels = load_label_encoder()
 
 # -------------------------------
-# 🧩 Class Labels
+# 🧍 FACE + IRIS PLACEHOLDERS
 # -------------------------------
-CLASS_NAMES = ["Thumbs Up 👍", "Thumbs Down 👎", "Peace ✌️", "Stop ✋", "OK 👌", "Fist ✊"]
+def detect_face(image):
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+    faces = face_cascade.detectMultiScale(gray, 1.3, 5)
+    if len(faces) > 0:
+        st.success("✅ Face detected")
+    else:
+        st.warning("⚠️ No face detected")
 
-# -------------------------------
-# 📸 Camera Input
-# -------------------------------
-st.header("📷 Capture Your Gesture")
-img_file = st.camera_input("Show your hand gesture below")
-
-if img_file is not None:
-    image = Image.open(img_file)
-    st.image(image, caption="Captured Gesture", use_column_width=True)
-
-    # Preprocess the image
-    img = image.convert("RGB")
-    img = img.resize((128, 128))  # Change to your model’s input size
-    img_array = np.array(img, dtype=np.float32) / 255.0
-    img_array = np.expand_dims(img_array, axis=0)
-
-    # Run inference
-    interpreter.set_tensor(input_details[0]['index'], img_array)
-    interpreter.invoke()
-    preds = interpreter.get_tensor(output_details[0]['index'])[0]
-
-    # Get prediction
-    predicted_class = CLASS_NAMES[np.argmax(preds)]
-    confidence = float(np.max(preds)) * 100
-
-    st.success(f"### 🧾 Prediction: {predicted_class}")
-    st.write(f"**Confidence:** {confidence:.2f}%")
-
-    st.progress(confidence / 100)
-
-else:
-    st.info("Please show your gesture to the camera.")
+def detect_iris(image):
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    st.info("👁️ Iris detection simulated (placeholder for actual model)")
 
 # -------------------------------
-# 🔮 For Future Expansion
+# ✋ GESTURE RECOGNITION
 # -------------------------------
-st.markdown("""
----
-### 🌍 Future Scope
-- Add **Face** and **Iris** authentication (same pipeline).
-- Integrate **Emotion Detection** via MediaPipe.
-- Combine all into a single **multimodal authentication system**.
-- Deploy on mobile or IoT devices using **TensorFlow Lite**.
-""")
+def predict_gesture(frame):
+    img = cv2.resize(frame, (128, 128)) / 255.0
+    img = np.expand_dims(img, axis=0)
+    preds = gesture_model.predict(img)
+    pred_label = gesture_labels.inverse_transform([np.argmax(preds)])[0]
+    conf = np.max(preds)
+    return pred_label, conf
+
+# -------------------------------
+# 🖥️ STREAMLIT UI
+# -------------------------------
+st.title("🧠 Multimodal Biometric Auth System (Face + Iris + Gesture)")
+st.markdown("This app demonstrates multimodal authentication for **any user** using webcam input.")
+
+mode = st.sidebar.selectbox("Choose Mode", ["Face", "Iris", "Gesture"])
+
+if mode == "Face":
+    st.header("📸 Face Detection")
+    img_file = st.camera_input("Capture your face")
+    if img_file:
+        img = np.array(Image.open(img_file))
+        detect_face(img)
+
+elif mode == "Iris":
+    st.header("👁️ Iris Detection")
+    img_file = st.camera_input("Capture your eye region")
+    if img_file:
+        img = np.array(Image.open(img_file))
+        detect_iris(img)
+
+elif mode == "Gesture":
+    st.header("✋ Real-time Gesture Recognition")
+    st.write("Show a hand gesture to the camera...")
+
+    cam = st.camera_input("Capture Gesture Frame")
+    if cam:
+        frame = np.array(Image.open(cam))
+        label, conf = predict_gesture(frame)
+        st.success(f"Gesture: **{label}** (Confidence: {conf:.2f})")
+
+st.caption("Built using Streamlit • TensorFlow • OpenCV • Keras")
