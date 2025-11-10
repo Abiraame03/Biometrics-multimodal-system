@@ -1,9 +1,9 @@
-streamlit
-tensorflow
-opencv-python-headless
-mediapipe
-numpy
-pandas
-gTTS
-scikit-learn
+streamlit==1.36.0
+tensorflow==2.15.0
+opencv-python-headless==4.8.1.78
+mediapipe==0.10.11
+numpy==1.26.4
+gTTS==2.5.1
 requests
+Pillow
+pickle5
